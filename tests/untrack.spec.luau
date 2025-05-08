@@ -1,8 +1,7 @@
 local signals = require("../src")
 
 local computed = signals.computed
-local pauseTracking = signals.pauseTracking
-local resumeTracking = signals.resumeTracking
+local setCurrentSub = signals.setCurrentSub
 local signal = signals.signal
 
 local function getFunctionName()
@@ -14,9 +13,9 @@ local function shouldPauseTracking()
 	local src, setSrc = signal(0)
 
 	local c = computed(function()
-		pauseTracking()
+		local currentSub = setCurrentSub(nil)
 		local value = src()
-		resumeTracking()
+		setCurrentSub(currentSub)
 		return value
 	end)
 

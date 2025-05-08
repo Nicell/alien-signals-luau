@@ -1,86 +1,58 @@
-export type Dependency = {
-	subs: Link?,
-	subsTail: Link?,
-}
-
-export type Subscriber = {
-	flags: SubscriberFlags,
+export type ReactiveNode = {
 	deps: Link?,
 	depsTail: Link?,
+	subs: Link?,
+	subsTail: Link?,
+	flags: ReactiveFlags,
 }
 
 export type Link = {
-	dep: Dependency | (Dependency & Subscriber),
-	sub: Subscriber | (Dependency & Subscriber),
+	dep: ReactiveNode,
+	sub: ReactiveNode,
 	prevSub: Link?,
 	nextSub: Link?,
+	prevDep: Link?,
 	nextDep: Link?,
 }
 
-type OneWayLink<T> = {
-	target: T,
-	linked: OneWayLink<T>?,
+type Stack<T> = {
+	value: T,
+	prev: Stack<T>?,
 }
 
-export type SubscriberFlags = number
+export type ReactiveFlags = number
 
-local Computed = 0b00000001
-local Effect = 0b00000010
-local Tracking = 0b00000100
-local Notified = 0b00001000
-local Recursed = 0b00010000
-local Dirty = 0b00100000
-local PendingComputed = 0b01000000
-local PendingEffect = 0b10000000
-local Propagated = 0b11100000
+local NONE = 0b0000000
+local MUTABLE = 0b0000001
+local WATCHING = 0b0000010
+local RECURSED_CHECK = 0b0000100
+local RECURSED = 0b0001000
+local DIRTY = 0b0010000
+local PENDING = 0b0100000
 
-local SubscriberFlags = {
-	Computed = Computed,
-	Effect = Effect,
-	Tracking = Tracking,
-	Notified = Notified,
-	Recursed = Recursed,
-	Dirty = Dirty,
-	PendingComputed = PendingComputed,
-	PendingEffect = PendingEffect,
-	Propagated = Propagated,
+local ReactiveFlags = {
+	None = NONE,
+	Mutable = MUTABLE,
+	Watching = WATCHING,
+	RecursedCheck = RECURSED_CHECK,
+	Recursed = RECURSED,
+	Dirty = DIRTY,
+	Pending = PENDING,
 }
 
-local function createReactiveSystem(
-	updateComputed: (computed: Dependency & Subscriber) -> boolean,
-	notifyEffect: (effect: Subscriber) -> boolean
-)
-	local notifyBuffer: { Subscriber? } = {}
-	local notifyBufferIndex = 1
-	local notifyBufferLength = 0
+local function createReactiveSystem(props: {
+	update: (sub: ReactiveNode) -> boolean,
+	notify: (sub: ReactiveNode) -> (),
+	unwatched: (sub: ReactiveNode) -> (),
+})
+	local update = props.update
+	local notify = props.notify
+	local unwatched = props.unwatched
 
-	local function linkNewDep(dep: Dependency, sub: Subscriber, nextDep: Link?, depsTail: Link?): Link
-		local newLink: Link = {
-			dep = dep,
-			sub = sub,
-			nextDep = nextDep,
-		}
-		if depsTail == nil then
-			sub.deps = newLink
-		else
-			depsTail.nextDep = newLink
-		end
-		if dep.subs == nil then
-			dep.subs = newLink
-		else
-			local oldTail = dep.subsTail
-			newLink.prevSub = oldTail
-			oldTail.nextSub = newLink
-		end
-		sub.depsTail = newLink
-		dep.subsTail = newLink
-		return newLink
-	end
-
-	local function isValidLink(checkLink: Link, sub: Subscriber): boolean
+	local function isValidLink(checkLink: Link, sub: ReactiveNode): boolean
 		local depsTail = sub.depsTail
 		if depsTail then
-			local link = sub.deps
+			local link = sub.deps :: Link
 			repeat
 				if link == checkLink then
 					return true
@@ -88,330 +60,270 @@ local function createReactiveSystem(
 				if link == depsTail then
 					break
 				end
-				link = (link :: typeof(sub.deps)).nextDep
-			until link == nil
+				link = link.nextDep :: Link
+			until not link
 		end
 		return false
 	end
 
-	local function createLink(dep: Dependency, sub: Subscriber): Link?
-		local currentDep = sub.depsTail
-		if currentDep and currentDep.dep == dep then
+	local function link(dep: ReactiveNode, sub: ReactiveNode): ()
+		local prevDep = sub.depsTail
+		if prevDep and prevDep.dep == dep then
 			return
 		end
-		local nextDep = if currentDep then currentDep.nextDep else sub.deps
-		if nextDep and nextDep.dep == dep then
-			sub.depsTail = nextDep
+		local nextDep: Link?
+		local recursedCheck = bit32.band(sub.flags, RECURSED_CHECK) ~= 0
+		if recursedCheck then
+			nextDep = if prevDep then prevDep.nextDep else sub.deps
+			if nextDep and nextDep.dep == dep then
+				sub.depsTail = nextDep
+				return
+			end
+		end
+		local prevSub = dep.subsTail
+		if prevSub and prevSub.sub == sub and (not recursedCheck or isValidLink(prevSub, sub)) then
 			return
 		end
-		local depLastSub = dep.subsTail
-		if depLastSub and depLastSub.sub == sub and isValidLink(depLastSub, sub) then
-			return
+		local newLink: Link = {
+			dep = dep,
+			sub = sub,
+			prevDep = prevDep,
+			nextDep = nextDep,
+			prevSub = prevSub,
+		}
+		sub.depsTail = newLink
+		dep.subsTail = newLink
+		if nextDep then
+			nextDep.prevDep = newLink
 		end
-		return linkNewDep(dep, sub, nextDep, currentDep)
+		if prevDep then
+			prevDep.nextDep = newLink
+		else
+			sub.deps = newLink
+		end
+		if prevSub then
+			prevSub.nextSub = newLink
+		else
+			dep.subs = newLink
+		end
 	end
 
-	local function propagate(current: Link)
-		local next = current.nextSub
-		local branches: OneWayLink<Link?>?
-		local branchDepth = 0
-		local targetFlag = Dirty
-
-		while true do
-			local sub = current.sub
-			local subFlags = sub.flags
-
-			local shouldNotify = false
-
-			if bit32.band(subFlags, bit32.bor(Tracking, Recursed, Propagated)) == 0 then
-				sub.flags = bit32.bor(subFlags, targetFlag, Notified)
-				shouldNotify = true
-			elseif bit32.band(subFlags, Recursed) ~= 0 and bit32.band(subFlags, Tracking) == 0 then
-				sub.flags = bit32.bor(bit32.band(subFlags, bit32.bnot(Recursed)), targetFlag, Notified)
-				shouldNotify = true
-			elseif bit32.band(subFlags, Propagated) == 0 and isValidLink(current, sub) then
-				sub.flags = bit32.bor(subFlags, Recursed, targetFlag, Notified)
-				shouldNotify = (sub :: Dependency).subs ~= nil
+	local function unlink(link: Link, sub: ReactiveNode?): Link?
+		local sub = sub or link.sub
+		local dep = link.dep
+		local prevDep = link.prevDep
+		local nextDep = link.nextDep
+		local nextSub = link.nextSub
+		local prevSub = link.prevSub
+		if nextDep then
+			nextDep.prevDep = prevDep
+		else
+			sub.depsTail = prevDep
+		end
+		if prevDep then
+			prevDep.nextDep = nextDep
+		else
+			sub.deps = nextDep
+		end
+		if nextSub then
+			nextSub.prevSub = prevSub
+		else
+			dep.subsTail = prevSub
+		end
+		if prevSub then
+			prevSub.nextSub = nextSub
+		else
+			dep.subs = nextSub
+			if not nextSub then
+				unwatched(dep)
 			end
+		end
+		return nextDep
+	end
 
-			if shouldNotify then
-				local subSubs = (sub :: Dependency).subs
-				if subSubs then
-					current = subSubs
-					if subSubs.nextSub then
-						branches = { target = next, linked = branches }
-						branchDepth += 1
-						next = current.nextSub
-						targetFlag = PendingComputed
-					else
-						targetFlag = if bit32.band(subFlags, Effect) ~= 0 then PendingEffect else PendingComputed
+	local function propagate(link: Link): ()
+		local next = link.nextSub
+		local stack: Stack<Link?>?
+
+		repeat
+			local sub = link.sub
+
+			local flags = sub.flags
+
+			if bit32.band(flags, bit32.bor(MUTABLE, WATCHING)) ~= 0 then
+				if bit32.band(flags, bit32.bor(RECURSED_CHECK, RECURSED, DIRTY, PENDING)) == 0 then
+					sub.flags = bit32.bor(flags, PENDING)
+				elseif bit32.band(flags, bit32.bor(RECURSED_CHECK, RECURSED)) == 0 then
+					flags = NONE
+				elseif bit32.band(flags, RECURSED_CHECK) == 0 then
+					sub.flags = bit32.bor(bit32.band(flags, bit32.bnot(RECURSED)), PENDING)
+				elseif bit32.band(flags, bit32.bor(DIRTY, PENDING)) == 0 and isValidLink(link, sub) then
+					sub.flags = bit32.bor(flags, bit32.bor(RECURSED, PENDING))
+					flags = bit32.band(flags, MUTABLE)
+				else
+					-- selene: allow(if_same_then_else)
+					flags = NONE
+				end
+
+				if bit32.band(flags, WATCHING) ~= 0 then
+					notify(sub)
+				end
+
+				if bit32.band(flags, MUTABLE) ~= 0 then
+					local subSubs = sub.subs
+					if subSubs then
+						link = subSubs
+						if subSubs.nextSub then
+							stack = { value = next, prev = stack }
+							next = link.nextSub
+						end
+						continue
 					end
-					continue
 				end
-				if bit32.band(subFlags, Effect) ~= 0 then
-					notifyBufferLength += 1
-					notifyBuffer[notifyBufferLength] = sub
-				end
-			elseif bit32.band(subFlags, bit32.bor(Tracking, targetFlag)) == 0 then
-				sub.flags = bit32.bor(subFlags, targetFlag, Notified)
-				if bit32.band(subFlags, bit32.bor(Effect, Notified)) == Effect then
-					notifyBufferLength += 1
-					notifyBuffer[notifyBufferLength] = sub
-				end
-			elseif
-				bit32.band(subFlags, targetFlag) == 0
-				and bit32.band(subFlags, Propagated) ~= 0
-				and isValidLink(current, sub)
-			then
-				sub.flags = bit32.bor(subFlags, targetFlag)
 			end
 
-			current = next
+			link = next :: Link
 
-			if current then
-				next = current.nextSub
-				targetFlag = if branchDepth > 0 then PendingComputed else Dirty
+			if link then
+				next = link.nextSub
 				continue
 			end
 
-			local shouldContinue = false
+			local continueTop = false
 
-			while branchDepth > 0 do
-				branchDepth -= 1
-				current = (branches :: OneWayLink<Link?>).target
-				branches = (branches :: OneWayLink<Link?>).linked
-				if current then
-					next = current.nextSub
-					targetFlag = if branchDepth > 0 then PendingComputed else Dirty
-					shouldContinue = true
+			while stack do
+				link = stack.value :: Link
+				stack = stack.prev
+				if link then
+					next = link.nextSub
+					continueTop = true
 					break
 				end
 			end
 
-			if shouldContinue then
+			if continueTop then
 				continue
 			end
 
 			break
-		end
+		until false
 	end
 
-	local function startTracking(sub: Subscriber)
+	local function startTracking(sub: ReactiveNode): ()
 		sub.depsTail = nil
-		sub.flags = bit32.bor(bit32.band(sub.flags, bit32.bnot(bit32.bor(Notified, Recursed, Propagated))), Tracking)
+		sub.flags = bit32.bor(bit32.band(sub.flags, bit32.bnot(bit32.bor(RECURSED, DIRTY, PENDING))), RECURSED_CHECK)
 	end
 
-	local function clearTracking(link: Link)
-		repeat
-			local dep = link.dep
-			local nextDep = link.nextDep
-			local nextSub = link.nextSub
-			local prevSub = link.prevSub
-
-			if nextSub then
-				nextSub.prevSub = prevSub
-			else
-				dep.subsTail = prevSub
-			end
-
-			if prevSub then
-				prevSub.nextSub = nextSub
-			else
-				dep.subs = nextSub
-			end
-
-			if dep.subs == nil and dep.deps then
-				local depFlags = dep.flags
-				if bit32.band(depFlags, Dirty) == 0 then
-					dep.flags = bit32.bor(depFlags, Dirty)
-				end
-				local depDeps = dep.deps
-				if depDeps then
-					link = depDeps
-					dep.depsTail.nextDep = nextDep
-					dep.deps = nil
-					dep.depsTail = nil
-					continue
-				end
-			end
-			link = nextDep
-		until link == nil
-	end
-
-	local function endTracking(sub: Subscriber)
+	local function endTracking(sub: ReactiveNode): ()
 		local depsTail = sub.depsTail
-		if depsTail then
-			local nextDep = depsTail.nextDep
-			if nextDep then
-				clearTracking(nextDep)
-				depsTail.nextDep = nil
-			end
-		elseif sub.deps then
-			clearTracking(sub.deps)
-			sub.deps = nil
+		local toRemove = if depsTail then depsTail.nextDep else sub.deps
+		while toRemove do
+			toRemove = unlink(toRemove, sub)
 		end
-		sub.flags = bit32.band(sub.flags, bit32.bnot(Tracking))
+		sub.flags = bit32.band(sub.flags, bit32.bnot(RECURSED_CHECK))
 	end
 
-	local function shallowPropagate(link: Link)
+	local function shallowPropagate(link: Link): ()
 		repeat
 			local sub = link.sub
 			local subFlags = sub.flags
-			if bit32.band(subFlags, bit32.bor(PendingComputed, Dirty)) == PendingComputed then
-				sub.flags = bit32.bor(subFlags, Dirty, Notified)
-				if bit32.band(subFlags, bit32.bor(Effect, Notified)) == Effect then
-					notifyBufferLength += 1
-					notifyBuffer[notifyBufferLength] = sub
+			if bit32.band(subFlags, bit32.bor(PENDING, DIRTY)) == PENDING then
+				sub.flags = bit32.bor(subFlags, DIRTY)
+				if bit32.band(subFlags, WATCHING) ~= 0 then
+					notify(sub)
 				end
 			end
-			link = link.nextSub
-		until link == nil
+			link = link.nextSub :: Link
+		until not link
 	end
 
-	local function checkDirty(current: Link): boolean
-		local prevLinks: OneWayLink<Link>?
+	local function checkDirty(link: Link, sub: ReactiveNode): boolean
+		local stack: Stack<Link>?
 		local checkDepth = 0
-		local dirty: boolean
 
-		while true do
-			dirty = false
-			local dep = current.dep
+		repeat
+			local dep = link.dep
+			local depFlags = dep.flags
 
-			if bit32.band(current.sub.flags, Dirty) ~= 0 then
+			local dirty = false
+
+			if bit32.band(sub.flags, DIRTY) ~= 0 then
 				dirty = true
-			elseif dep.flags then
-				local depFlags = dep.flags
-				if bit32.band(depFlags, bit32.bor(Computed, Dirty)) == bit32.bor(Computed, Dirty) then
-					if updateComputed(dep) then
-						local subs = dep.subs
-						if subs.nextSub then
-							shallowPropagate(subs)
-						end
-						dirty = true
+			elseif bit32.band(depFlags, bit32.bor(MUTABLE, DIRTY)) == bit32.bor(MUTABLE, DIRTY) then
+				if update(dep) then
+					local subs = dep.subs :: Link
+					if subs.nextSub then
+						shallowPropagate(subs)
 					end
-				elseif
-					bit32.band(depFlags, bit32.bor(Computed, PendingComputed)) == bit32.bor(Computed, PendingComputed)
-				then
-					if current.nextSub or current.prevSub then
-						prevLinks = { target = current, linked = prevLinks }
-					end
-					current = dep.deps
-					checkDepth += 1
-					continue
+					dirty = true
 				end
-			end
-
-			if not dirty and current.nextDep then
-				current = current.nextDep
+			elseif bit32.band(depFlags, bit32.bor(MUTABLE, PENDING)) == bit32.bor(MUTABLE, PENDING) then
+				if link.nextSub or link.prevSub then
+					stack = { value = link, prev = stack }
+				end
+				link = dep.deps :: Link
+				sub = dep
+				checkDepth += 1
 				continue
 			end
 
-			local shouldContinue = false
+			if not dirty and link.nextDep then
+				link = link.nextDep
+				continue
+			end
 
-			while checkDepth > 0 do
+			local continueTop = false
+
+			while checkDepth ~= 0 do
 				checkDepth -= 1
-				local sub = current.sub :: Dependency & Subscriber
-				local firstSub = sub.subs
+				local firstSub = sub.subs :: Link
+				local hasMultipleSubs = firstSub.nextSub ~= nil
+				if hasMultipleSubs then
+					link = (stack :: Stack<Link>).value
+					stack = (stack :: Stack<Link>).prev
+				else
+					link = firstSub
+				end
 				if dirty then
-					if updateComputed(sub) then
-						if firstSub.nextSub then
-							current = (prevLinks :: OneWayLink<Link>).target
-							prevLinks = (prevLinks :: OneWayLink<Link>).linked
+					if update(sub) then
+						if hasMultipleSubs then
 							shallowPropagate(firstSub)
-						else
-							current = firstSub
 						end
+						sub = link.sub
 						continue
 					end
 				else
-					sub.flags = bit32.band(sub.flags, bit32.bnot(PendingComputed))
+					sub.flags = bit32.band(sub.flags, bit32.bnot(PENDING))
 				end
-				if firstSub.nextSub then
-					current = (prevLinks :: OneWayLink<Link>).target
-					prevLinks = (prevLinks :: OneWayLink<Link>).linked
-				else
-					current = firstSub
-				end
-				if current.nextDep then
-					current = current.nextDep
-					shouldContinue = true
+				sub = link.sub
+				if link.nextDep then
+					link = link.nextDep
+					continueTop = true
 					break
 				end
-
 				dirty = false
 			end
 
-			if shouldContinue then
+			if continueTop then
 				continue
 			end
 
 			return dirty
-		end
-	end
-
-	local function updateDirtyFlag(sub: Subscriber, flags: SubscriberFlags): boolean
-		if checkDirty(sub.deps) then
-			sub.flags = bit32.bor(flags, Dirty)
-			return true
-		else
-			sub.flags = bit32.band(flags, bit32.bnot(PendingComputed))
-			return false
-		end
-	end
-
-	local function processComputedUpdate(computed: Dependency & Subscriber, flags: SubscriberFlags)
-		if bit32.band(flags, Dirty) ~= 0 or checkDirty(computed.deps) then
-			if updateComputed(computed) then
-				local subs = computed.subs
-				if subs then
-					shallowPropagate(subs)
-				end
-			end
-		else
-			computed.flags = bit32.band(flags, bit32.bnot(PendingComputed))
-		end
-	end
-
-	local function processPendingInnerEffects(sub: Subscriber, flags: SubscriberFlags)
-		if bit32.band(flags, PendingEffect) ~= 0 then
-			sub.flags = bit32.band(flags, bit32.bnot(PendingEffect))
-			local link = sub.deps
-			repeat
-				local dep = (link :: typeof(sub.deps)).dep
-				if dep.flags and bit32.band(dep.flags, Effect) ~= 0 and bit32.band(dep.flags, Propagated) ~= 0 then
-					notifyEffect(dep)
-				end
-				link = (link :: typeof(sub.deps)).nextDep
-			until link == nil
-		end
-	end
-
-	local function processEffectNotifications()
-		while notifyBufferIndex <= notifyBufferLength do
-			local effect = notifyBuffer[notifyBufferIndex]
-			notifyBuffer[notifyBufferIndex] = nil
-			notifyBufferIndex += 1
-			if not notifyEffect(effect) then
-				effect.flags = bit32.band(effect.flags, bit32.bnot(Notified))
-			end
-		end
-		notifyBufferIndex = 1
-		notifyBufferLength = 0
+		until false
 	end
 
 	return {
-		link = createLink,
+		link = link,
+		unlink = unlink,
 		propagate = propagate,
-		updateDirtyFlag = updateDirtyFlag,
-		startTracking = startTracking,
+		checkDirty = checkDirty,
 		endTracking = endTracking,
-		processEffectNotifications = processEffectNotifications,
-		processComputedUpdate = processComputedUpdate,
-		processPendingInnerEffects = processPendingInnerEffects,
+		startTracking = startTracking,
+		shallowPropagate = shallowPropagate,
 	}
 end
 
 return {
+	ReactiveFlags = ReactiveFlags,
 	createReactiveSystem = createReactiveSystem,
-	SubscriberFlags = SubscriberFlags,
 }
