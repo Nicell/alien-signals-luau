@@ -2,14 +2,13 @@ local signals = require("../src")
 
 local computed = signals.computed
 local effect = signals.effect
-local pauseTracking = signals.pauseTracking
-local resumeTracking = signals.resumeTracking
+local setCurrentSub = signals.setCurrentSub
 local signal = signals.signal
 
 local function untracked<T>(callback: () -> T): T
-	pauseTracking()
+	local currentSub = setCurrentSub(nil)
 	local success, result = pcall(callback)
-	resumeTracking()
+	setCurrentSub(currentSub)
 	if not success then
 		error(result)
 	end
@@ -29,11 +28,13 @@ local function reaction<T>(
 	effectFn: (newValue: T, oldValue: T?) -> (),
 	optionsParam: ReactionOptions<T>?
 ): () -> ()
-	local options = optionsParam or {}
-	local scheduler = options.scheduler or function(fn)
+	local options: ReactionOptions<T> = optionsParam or {}
+	local scheduler = options.scheduler or function(fn: () -> ())
 		fn()
 	end
-	local equals = options.equals or rawequal
+	local equals = options.equals or function(a: T, b: T)
+		return a == b
+	end
 	local onError = options.onError
 	local once = options.once or false
 	local fireImmediately = options.fireImmediately or false
@@ -49,6 +50,7 @@ local function reaction<T>(
 				if onError then
 					onError(resultOrError)
 				end
+				return nil
 			end)
 			return prevValue
 		end
@@ -68,7 +70,7 @@ local function reaction<T>(
 		prevValue = current
 		untracked(function()
 			scheduler(function()
-				local success, err = pcall(effectFn, current, oldValue)
+				local success, err: any = pcall(effectFn, current, oldValue)
 				if not success then
 					if onError then
 						onError(err)
@@ -76,6 +78,7 @@ local function reaction<T>(
 				end
 				if once then
 					if disposeInnerEffect then
+						-- selene: allow(if_same_then_else)
 						if fireImmediately and version > 1 then
 							disposeInnerEffect()
 						elseif not fireImmediately and version > 0 then
@@ -84,6 +87,7 @@ local function reaction<T>(
 					end
 				end
 			end)
+			return nil
 		end)
 	end)
 

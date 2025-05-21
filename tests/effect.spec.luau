@@ -4,8 +4,7 @@ local computed = signals.computed
 local effect = signals.effect
 local effectScope = signals.effectScope
 local endBatch = signals.endBatch
-local pauseTracking = signals.pauseTracking
-local resumeTracking = signals.resumeTracking
+local setCurrentSub = signals.setCurrentSub
 local signal = signals.signal
 local startBatch = signals.startBatch
 
@@ -39,10 +38,6 @@ local function shouldNotRunUntrackedInnerEffect()
 		return getA() > 0
 	end)
 
-	local function decrement()
-		setA(getA() - 1)
-	end
-
 	effect(function()
 		if b() then
 			effect(function()
@@ -53,9 +48,9 @@ local function shouldNotRunUntrackedInnerEffect()
 		end
 	end)
 
-	decrement()
-	decrement()
-	decrement()
+	setA(2)
+	setA(1)
+	setA(0)
 end
 
 local function shouldRunOuterEffectFirst()
@@ -70,7 +65,6 @@ local function shouldRunOuterEffectFirst()
 					error("bad")
 				end
 			end)
-		else
 		end
 	end)
 
@@ -177,7 +171,7 @@ local function shouldCustomEffectSupportBatch()
 	end
 
 	local logs = {}
-	local getA, setA = signal(0)
+	local getA = signal(0)
 	local getB, setB = signal(0)
 
 	local aa = computed(function()
@@ -186,6 +180,7 @@ local function shouldCustomEffectSupportBatch()
 			setB(1)
 		end
 		table.insert(logs, "aa-1")
+		return nil
 	end)
 
 	local bb = computed(function()
@@ -213,9 +208,9 @@ local function shouldDuplicateSubscribersDoNotAffectTheNotifyOrder()
 
 	effect(function()
 		table.insert(order, "a")
-		pauseTracking()
+		local currentSub = setCurrentSub(nil)
 		local isOne = getSrc2() == 1
-		resumeTracking()
+		setCurrentSub(currentSub)
 		if isOne then
 			getSrc1()
 		end

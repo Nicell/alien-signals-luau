@@ -69,8 +69,25 @@ local function shouldHandleIndirectDirtyFlagUpdate()
 	assert(d() == true, getFunctionName())
 end
 
+local function shouldNotUpdateIfSignalValueReverted()
+	local times = 0
+
+	local src, setSrc = signal(0)
+	local c1 = computed(function()
+		times += 1
+		return src()
+	end)
+	c1()
+	assert(times == 1, getFunctionName())
+	setSrc(1)
+	setSrc(0)
+	c1()
+	assert(times == 1, getFunctionName())
+end
+
 shouldPropagateThroughComputed()
 shouldPropagateThroughChainedComputations()
 shouldHandleIndirectDirtyFlagUpdate()
+shouldNotUpdateIfSignalValueReverted()
 
 return {}

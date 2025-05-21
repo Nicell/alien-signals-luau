@@ -165,27 +165,27 @@ local function shouldOnlyUpdateEverySignalOnceJaggedDiamondGraphPlusTails()
 		return c()
 	end)
 
-	local eOrderLog = {}
+	local _eOrderLog = {}
 	local eCount = 0
 	local e = computed(function()
 		eCount = eCount + 1
-		table.insert(eOrderLog, "e")
+		table.insert(_eOrderLog, "e")
 		return b() .. " " .. d()
 	end)
 
-	local fOrderLog = {}
+	local _fOrderLog = {}
 	local fCount = 0
 	local f = computed(function()
 		fCount = fCount + 1
-		table.insert(fOrderLog, "f")
+		table.insert(_fOrderLog, "f")
 		return e()
 	end)
 
-	local gOrderLog = {}
+	local _gOrderLog = {}
 	local gCount = 0
 	local g = computed(function()
 		gCount = gCount + 1
-		table.insert(gOrderLog, "g")
+		table.insert(_gOrderLog, "g")
 		return e()
 	end)
 
@@ -203,9 +203,9 @@ local function shouldOnlyUpdateEverySignalOnceJaggedDiamondGraphPlusTails()
 	 a more complex logging setup or a dedicated mock library.
 	 This translation verifies the counts and final values.
 	]]
-	eOrderLog = {}
-	fOrderLog = {}
-	gOrderLog = {}
+	_eOrderLog = {}
+	_fOrderLog = {}
+	_gOrderLog = {}
 	eCount = 0
 	fCount = 0
 	gCount = 0
@@ -221,9 +221,9 @@ local function shouldOnlyUpdateEverySignalOnceJaggedDiamondGraphPlusTails()
 	assert(fCount == 1, getFunctionName())
 	assert(gCount == 1, getFunctionName())
 
-	eOrderLog = {}
-	fOrderLog = {}
-	gOrderLog = {}
+	_eOrderLog = {}
+	_fOrderLog = {}
+	_gOrderLog = {}
 	eCount = 0
 	fCount = 0
 	gCount = 0
@@ -251,7 +251,7 @@ local function shouldOnlySubscribeToSignalsListenedTo()
 	end)
 
 	local spyCount = 0
-	local c = computed(function()
+	local _c = computed(function()
 		spyCount = spyCount + 1
 		return getA()
 	end)

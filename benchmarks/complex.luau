@@ -10,7 +10,7 @@ local dimensions = { 1, 10, 100 }
 for _, w in dimensions do
 	for _, h in dimensions do
 		bench(`propagate: {w} * {h}`, function()
-			local src, setSrc = signal({ w = w, h = h })
+			local src, setSrc = signal({ w = w, h = h } :: {})
 			for i = 1, w do
 				local last = src
 				for j = 1, h do
